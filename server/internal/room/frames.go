@@ -10,12 +10,14 @@ import (
 type FrameKind string
 
 const (
-	KindMatchStarted FrameKind = "match_started" // 对局开始：先手 + 初始快照（即回合 1 快照）
-	KindTurnStarted  FrameKind = "turn_started"  // 回合开始：全量快照
-	KindSwapResult   FrameKind = "swap_result"   // 有效交换：连锁波次 + 最终棋盘
-	KindSwapRejected FrameKind = "swap_rejected" // 无效/越权交换：回弹或拒绝
-	KindReshuffle    FrameKind = "reshuffle"     // 死局重排：棋盘更新，分数与回合不变
-	KindSettlement   FrameKind = "settlement"    // 终局结算：胜/负/Draw
+	KindMatchStarted      FrameKind = "match_started"      // 对局开始：先手 + 初始快照（即回合 1 快照）
+	KindTurnStarted       FrameKind = "turn_started"       // 回合开始：全量快照
+	KindSwapResult        FrameKind = "swap_result"        // 有效交换：连锁波次 + 最终棋盘
+	KindSwapRejected      FrameKind = "swap_rejected"      // 无效/越权交换：回弹或拒绝
+	KindReshuffle         FrameKind = "reshuffle"          // 死局重排：棋盘更新，分数与回合不变
+	KindSettlement        FrameKind = "settlement"         // 终局结算：胜/负/Draw
+	KindReconnected       FrameKind = "reconnected"        // 重连成功：全量快照恢复对局
+	KindReconnectRejected FrameKind = "reconnect_rejected" // 重连被拒：token 校验失败
 )
 
 // Frame 是房间向双玩家广播的事件帧（ADR-0003：快照帧 + 结果帧）。
@@ -104,3 +106,27 @@ type SettlementFrame struct {
 }
 
 func (SettlementFrame) Kind() FrameKind { return KindSettlement }
+
+// ReconnectedFrame 是重连成功回执：凭对局 token 校验通过后下发全量快照，
+// 客户端据此恢复棋盘、得分、回合与倒计时（ADR-0003：重连 = 拉一次快照）。
+type ReconnectedFrame struct {
+	Seat int // 重连方座位
+	Snapshot
+}
+
+func (ReconnectedFrame) Kind() FrameKind { return KindReconnected }
+
+// ReconnectRejectReason 是重连被拒的原因。
+type ReconnectRejectReason string
+
+const (
+	ReconnectBadToken ReconnectRejectReason = "bad_token" // 对局 token 不匹配
+)
+
+// ReconnectRejectedFrame 是被拒重连的回执。掉线状态保留：宽限期照常计时。
+type ReconnectRejectedFrame struct {
+	Seat   int
+	Reason ReconnectRejectReason
+}
+
+func (ReconnectRejectedFrame) Kind() FrameKind { return KindReconnectRejected }

@@ -14,14 +14,15 @@ import (
 
 // Config 是对局参数，均为服务端配置项而非硬编码。
 type Config struct {
-	Board       judge.Config // 棋盘尺寸与颜色数
-	TurnSeconds int          // 每回合操作窗口秒数
-	TotalTurns  int          // 一局总回合数，双方交替（12 = 双方各 6）
+	Board        judge.Config // 棋盘尺寸与颜色数
+	TurnSeconds  int          // 每回合操作窗口秒数
+	TotalTurns   int          // 一局总回合数，双方交替（12 = 双方各 6）
+	GraceSeconds int          // 掉线宽限期秒数：届满未重连即判负
 }
 
-// DefaultConfig 是 MVP 配置：9x9 / 6 色，每回合 10 秒，共 12 回合。
+// DefaultConfig 是 MVP 配置：9x9 / 6 色，每回合 10 秒，共 12 回合，宽限 60 秒。
 func DefaultConfig() Config {
-	return Config{Board: judge.DefaultConfig(), TurnSeconds: 10, TotalTurns: 12}
+	return Config{Board: judge.DefaultConfig(), TurnSeconds: 10, TotalTurns: 12, GraceSeconds: 60}
 }
 
 // Deps 注入外部性。零值字段使用默认实现（全局随机源 / time.Now）。
@@ -48,40 +49,58 @@ type swapCmd struct {
 
 type deadlineCmd struct{ turn int }
 
-func (swapCmd) isCommand()     {}
-func (deadlineCmd) isCommand() {}
+type disconnectCmd struct{ seat int }
+
+type reconnectCmd struct {
+	seat  int
+	token string
+}
+
+type graceExpiryCmd struct{ seat int }
+
+func (swapCmd) isCommand()        {}
+func (deadlineCmd) isCommand()    {}
+func (disconnectCmd) isCommand()  {}
+func (reconnectCmd) isCommand()   {}
+func (graceExpiryCmd) isCommand() {}
 
 // Room 是一个对局房间：事件循环 goroutine 独占写全部对局状态，无锁。
 // 生命周期：Run 发出 MatchStarted，串行处理命令，发出 Settlement 后返回。
 type Room struct {
-	cfg   Config
-	seats [2]string
-	rng   judge.TileRNG
-	coin  func() int
-	now   func() time.Time
-	sinks [2]Sink
-	cmds  chan command
+	cfg    Config
+	seats  [2]string
+	tokens [2]string // 每座位对局 token：Reconnect 凭此校验，不随帧广播
+	rng    judge.TileRNG
+	coin   func() int
+	now    func() time.Time
+	sinks  [2]Sink
+	cmds   chan command
 
 	// —— 以下状态仅事件循环 goroutine 可见（ADR-0004）——
-	board    judge.Board
-	scores   [2]int
-	turn     int // 1-based；MatchStarted 时置 1
-	operator int // 当前操作方座位（0/1）
-	deadline time.Time
-	finished bool
+	board        judge.Board
+	scores       [2]int
+	turn         int // 1-based；MatchStarted 时置 1
+	operator     int // 当前操作方座位（0/1）
+	deadline     time.Time
+	disconnected [2]bool // 座位是否处于掉线宽限期
+	finished     bool
 }
 
-// New 创建房间。sinks 按座位序接收广播帧；seats 为双方玩家标识。
+// New 创建房间。sinks 按座位序接收广播帧；seats 为双方玩家标识，tokens 为
+// 各座位的对局重连凭据（由匹配层签发，经各自私通道下发，绝不广播）。
 // 参数非法时 panic（编程错误）。
-func New(seats [2]string, cfg Config, deps Deps, sinks [2]Sink) *Room {
+func New(seats [2]string, tokens [2]string, cfg Config, deps Deps, sinks [2]Sink) *Room {
 	if cfg.Board.Width <= 0 || cfg.Board.Height <= 0 || cfg.Board.Colors <= 0 {
 		panic("room: invalid board config")
 	}
-	if cfg.TurnSeconds <= 0 || cfg.TotalTurns <= 0 {
-		panic("room: TurnSeconds and TotalTurns must be positive")
+	if cfg.TurnSeconds <= 0 || cfg.TotalTurns <= 0 || cfg.GraceSeconds <= 0 {
+		panic("room: TurnSeconds, TotalTurns and GraceSeconds must be positive")
 	}
 	if seats[0] == "" || seats[1] == "" || seats[0] == seats[1] {
 		panic("room: seat ids must be non-empty and distinct")
+	}
+	if tokens[0] == "" || tokens[1] == "" || tokens[0] == tokens[1] {
+		panic("room: match tokens must be non-empty and distinct")
 	}
 	for i, sink := range sinks {
 		if sink == nil {
@@ -101,13 +120,14 @@ func New(seats [2]string, cfg Config, deps Deps, sinks [2]Sink) *Room {
 		now = time.Now
 	}
 	return &Room{
-		cfg:   cfg,
-		seats: seats,
-		rng:   rng,
-		coin:  coin,
-		now:   now,
-		sinks: sinks,
-		cmds:  make(chan command, 64),
+		cfg:    cfg,
+		seats:  seats,
+		tokens: tokens,
+		rng:    rng,
+		coin:   coin,
+		now:    now,
+		sinks:  sinks,
+		cmds:   make(chan command, 64),
 	}
 }
 
@@ -124,8 +144,43 @@ func (r *Room) SubmitDeadline(turn int) {
 	r.cmds <- deadlineCmd{turn: turn}
 }
 
+// Disconnect 标记玩家掉线：其回合窗口照常计时流逝，不做任何跳过惩罚；
+// 宽限期时长为 cfg.GraceSeconds，真实部署由协议层掉线即启动宽限定时器、
+// 届满调用 SubmitGraceExpiry（重连后定时器由协议层取消）。重复掉线忽略。
+func (r *Room) Disconnect(seat int) {
+	if !validSeat(seat) {
+		return
+	}
+	r.cmds <- disconnectCmd{seat: seat}
+}
+
+// Reconnect 凭对局 token 重连：校验通过即清除掉线标记并广播全量快照，
+// 对局其余状态一概不变、无缝续局；token 错误回执拒绝帧，掉线状态保留。
+// 已在线座位的重复重连等价于一次快照拉取（幂等，重试安全）。
+func (r *Room) Reconnect(seat int, token string) {
+	if !validSeat(seat) {
+		return
+	}
+	r.cmds <- reconnectCmd{seat: seat, token: token}
+}
+
+// SubmitGraceExpiry 投递宽限期届满命令。真实部署由宽限定时器在
+// cfg.GraceSeconds 到期时调用；仅对当前处于掉线状态的座位生效，
+// 已重连座位的迟到届满命令被忽略。
+func (r *Room) SubmitGraceExpiry(seat int) {
+	if !validSeat(seat) {
+		return
+	}
+	r.cmds <- graceExpiryCmd{seat: seat}
+}
+
+// validSeat 报告座位号是否合法。座位由协议层从连接映射派生而非客户端
+// 自选，越界即协议层缺陷或被篡改输入：直接忽略，绝不让事件循环 panic
+// 波及同房玩家（ADR-0001）。
+func validSeat(seat int) bool { return seat == 0 || seat == 1 }
+
 // Run 运行事件循环直至 Settlement：先发对局开始帧，再串行处理全部命令。
-// 终局后返回；此后 SubmitSwap/SubmitDeadline 仅入队缓冲，不再被消费。
+// 终局（打满回合或宽限判负）后返回；此后命令投递方法仅入队缓冲，不再被消费。
 func (r *Room) Run() {
 	r.startMatch()
 	for cmd := range r.cmds {
@@ -135,6 +190,14 @@ func (r *Room) Run() {
 		case deadlineCmd:
 			if !r.finished && c.turn == r.turn {
 				r.closeWindow()
+			}
+		case disconnectCmd:
+			r.disconnected[c.seat] = true
+		case reconnectCmd:
+			r.handleReconnect(c)
+		case graceExpiryCmd:
+			if !r.finished && r.disconnected[c.seat] {
+				r.settle(1 - c.seat) // 宽限届满未归：对方判胜，Room 释放
 			}
 		}
 		if r.finished {
@@ -186,21 +249,33 @@ func (r *Room) handleSwap(c swapCmd) {
 	}
 }
 
+// handleReconnect 处理重连：token 校验失败即回执拒绝（掉线状态保留，
+// 宽限期照常计时）；通过则清除掉线标记并广播当前全量快照。
+func (r *Room) handleReconnect(c reconnectCmd) {
+	if c.token != r.tokens[c.seat] {
+		r.emit(ReconnectRejectedFrame{Seat: c.seat, Reason: ReconnectBadToken})
+		return
+	}
+	r.disconnected[c.seat] = false
+	r.emit(ReconnectedFrame{Seat: c.seat, Snapshot: r.snapshot()})
+}
+
 // closeWindow 处理当前回合窗口截止：流转下一回合（交替操作方）或终局结算。
 func (r *Room) closeWindow() {
 	if r.turn >= r.cfg.TotalTurns {
-		r.finished = true
-		r.emit(SettlementFrame{
-			Draw:   r.scores[0] == r.scores[1],
-			Winner: winnerOf(r.scores),
-			Scores: r.scores,
-		})
+		r.settle(winnerOf(r.scores))
 		return
 	}
 	r.turn++
 	r.operator = 1 - r.operator
 	r.deadline = r.now().Add(r.window())
 	r.emit(TurnStartedFrame{Snapshot: r.snapshot()})
+}
+
+// settle 发出终局结算帧并结束事件循环（Room 释放）。winner = -1 表示 Draw。
+func (r *Room) settle(winner int) {
+	r.finished = true
+	r.emit(SettlementFrame{Draw: winner == -1, Winner: winner, Scores: r.scores})
 }
 
 func winnerOf(scores [2]int) int {

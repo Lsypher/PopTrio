@@ -110,7 +110,7 @@ func testDeps(t *testing.T, coin int, script []judge.Tile) room.Deps {
 func runRoom(t *testing.T, cfg room.Config, deps room.Deps, drive func(*room.Room)) []room.Frame {
 	t.Helper()
 	var left, right []room.Frame
-	r := room.New([2]string{"P0", "P1"}, cfg, deps, [2]room.Sink{
+	r := room.New([2]string{"P0", "P1"}, [2]string{"T0", "T1"}, cfg, deps, [2]room.Sink{
 		func(f room.Frame) { left = append(left, f) },
 		func(f room.Frame) { right = append(right, f) },
 	})
@@ -489,6 +489,216 @@ func TestConfigurableTiming(t *testing.T) {
 	}
 }
 
+// ---- 掉线宽限与重连 ----
+
+// TestReconnectDuringGraceReturnsFullSnapshot 座位 0 在回合 2 掉线（非操作方），
+// 其回合 3 照常开窗流逝、无跳过惩罚；回合 4 期间凭对局 token 重连：全量快照
+// 与当时对局状态逐字段一致，此后对局无缝打满并正常结算。
+func TestReconnectDuringGraceReturnsFullSnapshot(t *testing.T) {
+	frames := runRoom(t, room.DefaultConfig(), testDeps(t, 0, fullScript(t)), func(r *room.Room) {
+		r.SubmitSwap(0, swapA) // 回合 1：座位 0 得 3 分，死局重排
+		r.SubmitDeadline(1)    // 回合 2：操作方座位 1
+		r.Disconnect(0)        // 座位 0 掉线（非操作方）
+		r.SubmitDeadline(2)    // 回合 3：掉线者的回合照常流转
+		r.SubmitDeadline(3)    // 回合 4：座位 1 操作
+		r.Reconnect(0, "T0")   // 宽限期内重连
+		closeAllTurns(r, 12)   // 4..12 正常流转（1..3 已消费）
+	})
+
+	// 重连帧恰好插在回合 4 快照之后、无其他额外帧。
+	want := []room.FrameKind{room.KindMatchStarted, room.KindSwapResult, room.KindReshuffle,
+		room.KindTurnStarted, room.KindTurnStarted, room.KindTurnStarted, room.KindReconnected}
+	for i := 0; i < 8; i++ {
+		want = append(want, room.KindTurnStarted)
+	}
+	want = append(want, room.KindSettlement)
+	if !slices.Equal(kinds(frames), want) {
+		t.Fatalf("frame kinds = %v, want reconnect snapshot after turn 4: %v", kinds(frames), want)
+	}
+
+	rcIdx := slices.Index(kinds(frames), room.KindReconnected)
+	rc := frames[rcIdx].(room.ReconnectedFrame)
+	if rc.Seat != 0 {
+		t.Fatalf("reconnected seat = %d, want 0", rc.Seat)
+	}
+	// 快照与重连时刻的回合 4 快照逐字段一致（棋盘、得分、回合、操作方、截止）。
+	turn4 := snapshotOf(t, frames[rcIdx-1])
+	if !reflect.DeepEqual(rc.Snapshot, turn4) {
+		t.Fatalf("reconnect snapshot = %+v, want live snapshot %+v", rc.Snapshot, turn4)
+	}
+	if rc.Turn != 4 || rc.Operator != 1 || rc.Scores != [2]int{3, 0} {
+		t.Fatalf("reconnect snapshot = turn %d operator %d scores %v, want turn 4 operator 1 scores [3 0]",
+			rc.Turn, rc.Operator, rc.Scores)
+	}
+
+	// 对局无缝继续：终局结算与未掉线时完全一致。
+	settle := frames[len(frames)-1].(room.SettlementFrame)
+	if settle.Draw || settle.Winner != 0 || settle.Scores != [2]int{3, 0} {
+		t.Fatalf("settlement = %+v, want win for seat 0 with [3 0]", settle)
+	}
+}
+
+// TestDisconnectedOperatorTurnFlows 操作方在回合 1 掉线：其窗口照常截止易手，
+// 对方正常操作得分，重连后快照反映当前对局——掉线无冻结、无跳过惩罚。
+func TestDisconnectedOperatorTurnFlows(t *testing.T) {
+	frames := runRoom(t, room.DefaultConfig(), testDeps(t, 0, fullScript(t)), func(r *room.Room) {
+		r.Disconnect(0)        // 操作方回合 1 掉线（未操作）
+		r.SubmitDeadline(1)    // 窗口照常截止：易手座位 1
+		r.SubmitSwap(1, swapA) // 对方正常操作得 3 分（死局重排）
+		r.Reconnect(0, "T0")   // 座位 0 宽限期内回归
+		closeAllTurns(r, 12)
+	})
+
+	want := []room.FrameKind{room.KindMatchStarted, room.KindTurnStarted,
+		room.KindSwapResult, room.KindReshuffle, room.KindReconnected}
+	for i := 0; i < 10; i++ {
+		want = append(want, room.KindTurnStarted)
+	}
+	want = append(want, room.KindSettlement)
+	if !slices.Equal(kinds(frames), want) {
+		t.Fatalf("frame kinds = %v, want normal flow around the drop: %v", kinds(frames), want)
+	}
+
+	rc := frames[slices.Index(kinds(frames), room.KindReconnected)].(room.ReconnectedFrame)
+	if rc.Turn != 2 || rc.Operator != 1 || rc.Scores != [2]int{0, 3} {
+		t.Fatalf("reconnect snapshot = turn %d operator %d scores %v, want turn 2 operator 1 scores [0 3]",
+			rc.Turn, rc.Operator, rc.Scores)
+	}
+	settle := frames[len(frames)-1].(room.SettlementFrame)
+	if settle.Draw || settle.Winner != 1 || settle.Scores != [2]int{0, 3} {
+		t.Fatalf("settlement = %+v, want win for seat 1 with [0 3]", settle)
+	}
+}
+
+// TestGraceExpiryForfeits 宽限期届满未归：立即判负 Settlement（对方胜利，
+// 当前得分即终局得分），Room 释放（Run 返回）。开局首轮与得分后被判负各一测。
+func TestGraceExpiryForfeits(t *testing.T) {
+	tests := []struct {
+		name      string
+		loser     int
+		preSwap   bool
+		wantScore [2]int
+	}{
+		{"first turn nobody scored", 0, false, [2]int{0, 0}},
+		{"after opponent scored", 1, true, [2]int{3, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frames := runRoom(t, room.DefaultConfig(), testDeps(t, 0, fullScript(t)), func(r *room.Room) {
+				if tt.preSwap {
+					r.SubmitSwap(0, swapA)
+				}
+				r.Disconnect(tt.loser)
+				r.SubmitGraceExpiry(tt.loser)
+			})
+
+			want := []room.FrameKind{room.KindMatchStarted}
+			if tt.preSwap {
+				want = append(want, room.KindSwapResult, room.KindReshuffle)
+			}
+			want = append(want, room.KindSettlement)
+			if !slices.Equal(kinds(frames), want) {
+				t.Fatalf("frame kinds = %v, want forfeit settlement only: %v", kinds(frames), want)
+			}
+			settle := frames[len(frames)-1].(room.SettlementFrame)
+			if settle.Draw || settle.Winner != 1-tt.loser || settle.Scores != tt.wantScore {
+				t.Fatalf("settlement = %+v, want forfeit win for seat %d with %v",
+					settle, 1-tt.loser, tt.wantScore)
+			}
+		})
+	}
+}
+
+// TestReconnectBadTokenRejected token 校验失败回执拒绝帧，掉线状态保留：
+// 宽限期照常计时，届满仍判负。
+func TestReconnectBadTokenRejected(t *testing.T) {
+	frames := runRoom(t, room.DefaultConfig(), testDeps(t, 0, board1Tiles(t)), func(r *room.Room) {
+		r.Disconnect(0)
+		r.Reconnect(0, "wrong-token")
+		r.SubmitGraceExpiry(0) // 拒绝未清除掉线状态：届满照常判负
+	})
+
+	want := []room.FrameKind{room.KindMatchStarted, room.KindReconnectRejected, room.KindSettlement}
+	if !slices.Equal(kinds(frames), want) {
+		t.Fatalf("frame kinds = %v, want rejection then forfeit settlement: %v", kinds(frames), want)
+	}
+	rej := frames[1].(room.ReconnectRejectedFrame)
+	if rej.Seat != 0 || rej.Reason != room.ReconnectBadToken {
+		t.Fatalf("rejection = seat %d reason %s, want seat 0 bad_token", rej.Seat, rej.Reason)
+	}
+	settle := frames[2].(room.SettlementFrame)
+	if settle.Draw || settle.Winner != 1 || settle.Scores != [2]int{0, 0} {
+		t.Fatalf("settlement = %+v, want forfeit win for seat 1 with [0 0]", settle)
+	}
+}
+
+// TestLateGraceExpiryAfterReconnectIgnored 重连成功后再投迟到届满命令被忽略：
+// 掉线标记已清除，对局照常打满至正常结算，无判负。
+func TestLateGraceExpiryAfterReconnectIgnored(t *testing.T) {
+	frames := runRoom(t, room.DefaultConfig(), testDeps(t, 0, board1Tiles(t)), func(r *room.Room) {
+		r.Disconnect(0)
+		r.Reconnect(0, "T0")
+		r.SubmitGraceExpiry(0) // 迟到：座位 0 已重连
+		closeAllTurns(r, 12)
+	})
+
+	want := []room.FrameKind{room.KindMatchStarted, room.KindReconnected}
+	for i := 0; i < 11; i++ {
+		want = append(want, room.KindTurnStarted)
+	}
+	want = append(want, room.KindSettlement)
+	if !slices.Equal(kinds(frames), want) {
+		t.Fatalf("frame kinds = %v, want normal game after late grace expiry: %v", kinds(frames), want)
+	}
+	settle := frames[len(frames)-1].(room.SettlementFrame)
+	if !settle.Draw || settle.Winner != -1 || settle.Scores != [2]int{0, 0} {
+		t.Fatalf("settlement = %+v, want normal draw [0 0], not a forfeit", settle)
+	}
+}
+
+// TestOutOfRangeSeatCommandsIgnored 越界座位命令直接忽略：不 panic、不产生帧，
+// 事件循环与对局不受影响（ADR-0001：输入可能被篡改）。
+func TestOutOfRangeSeatCommandsIgnored(t *testing.T) {
+	frames := runRoom(t, room.DefaultConfig(), testDeps(t, 0, board1Tiles(t)), func(r *room.Room) {
+		r.Disconnect(7)
+		r.Reconnect(-1, "T0")
+		r.SubmitGraceExpiry(9)
+		closeAllTurns(r, 12)
+	})
+
+	want := []room.FrameKind{room.KindMatchStarted}
+	for i := 0; i < 11; i++ {
+		want = append(want, room.KindTurnStarted)
+	}
+	want = append(want, room.KindSettlement)
+	if !slices.Equal(kinds(frames), want) {
+		t.Fatalf("frame kinds = %v, want normal game with no effect from invalid seats: %v", kinds(frames), want)
+	}
+}
+
+// TestGraceSecondsConfigurable 宽限期时长为配置项。宽限定时器属协议层
+// （issue 05 接线，进程内测试注入 SubmitGraceExpiry），此处验证配置面：
+// 默认 60 秒，自定义值经 New 校验后可正常对局。
+func TestGraceSecondsConfigurable(t *testing.T) {
+	if got := room.DefaultConfig().GraceSeconds; got != 60 {
+		t.Fatalf("default grace seconds = %d, want 60", got)
+	}
+	cfg := room.DefaultConfig()
+	cfg.GraceSeconds = 5
+
+	frames := runRoom(t, cfg, testDeps(t, 0, board1Tiles(t)), func(r *room.Room) {
+		r.Disconnect(1)
+		r.Reconnect(1, "T1")
+		closeAllTurns(r, 12)
+	})
+	if slices.Index(kinds(frames), room.KindReconnected) == -1 {
+		t.Fatal("no reconnected frame under custom grace config")
+	}
+	if f := frames[len(frames)-1]; f.Kind() != room.KindSettlement {
+		t.Fatalf("last frame = %s, want settlement", f.Kind())
+	}
+}
+
 // ---- 并发提交：串行化与无数据竞态 ----
 
 // TestConcurrentSubmitNoRace 多 goroutine 并发投递 Swap 与截止命令，
@@ -498,7 +708,7 @@ func TestConcurrentSubmitNoRace(t *testing.T) {
 	// 投递方 goroutine 共用 math/rand/v2 顶层函数（并发安全）。
 	rng := rand.New(rand.NewPCG(42, 42))
 	var sinkCount int // 仅事件循环写入；测试在 <-done 之后读取
-	r := room.New([2]string{"P0", "P1"}, room.DefaultConfig(), room.Deps{
+	r := room.New([2]string{"P0", "P1"}, [2]string{"T0", "T1"}, room.DefaultConfig(), room.Deps{
 		TileRNG:   func(colors int) judge.Tile { return judge.Tile(rng.IntN(colors)) },
 		FirstCoin: func() int { return 0 },
 		Now:       func() time.Time { return baseTime },

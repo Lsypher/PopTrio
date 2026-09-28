@@ -34,10 +34,18 @@ type Board struct {
 	Tiles  []Tile // 长度 == Width*Height；下标 = Row*Width + Col
 }
 
+// validate 校验配置合法性。
+func (cfg Config) validate() error {
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Colors <= 0 {
+		return fmt.Errorf("judge: invalid config %+v", cfg)
+	}
+	return nil
+}
+
 // NewBoard 校验 cfg 与 tiles，返回持有 tiles 副本的 Board。
 func NewBoard(cfg Config, tiles []Tile) (Board, error) {
-	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Colors <= 0 {
-		return Board{}, fmt.Errorf("judge: invalid config %+v", cfg)
+	if err := cfg.validate(); err != nil {
+		return Board{}, err
 	}
 	if len(tiles) != cfg.Width*cfg.Height {
 		return Board{}, fmt.Errorf("judge: got %d tiles, want %d for %dx%d board",
@@ -72,6 +80,53 @@ func (b Board) ValidSwap(s Swap) bool {
 	dCol := abs(s.A.Col - s.B.Col)
 	dRow := abs(s.A.Row - s.B.Row)
 	return dCol+dRow == 1
+}
+
+// HasValidSwap 报告棋盘上是否存在至少一个交换后能形成连线的相邻交换。
+// 假定棋盘无现成连线（对局流程保证：棋盘只在 Cascade 结算完毕后接受交换）。
+func (b Board) HasValidSwap() bool {
+	for row := 0; row < b.Config.Height; row++ {
+		for col := 0; col < b.Config.Width; col++ {
+			p := Pos{Col: col, Row: row}
+			if col+1 < b.Config.Width && b.swapFormsLine(p, Pos{Col: col + 1, Row: row}) {
+				return true
+			}
+			if row+1 < b.Config.Height && b.swapFormsLine(p, Pos{Col: col, Row: row + 1}) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsDeadBoard 报告棋盘是否为死局：不存在任何有效交换。
+func (b Board) IsDeadBoard() bool { return !b.HasValidSwap() }
+
+// swapFormsLine 报告交换 p、q 两格后，p 或 q 是否处于 ≥3 连线中。
+// 交换只影响这两格，其余格子无需检视；等色交换不改变棋盘，恒为 false。
+func (b Board) swapFormsLine(p, q Pos) bool {
+	a, c := b.At(p), b.At(q)
+	if a == c {
+		return false
+	}
+	return b.runThrough(p, c) || b.runThrough(q, a)
+}
+
+// runThrough 报告若 p 处棋子为 color，p 是否处于横向或纵向 ≥3 连线中。
+func (b Board) runThrough(p Pos, color Tile) bool {
+	return b.extend(p, color, 1, 0) >= 3 || b.extend(p, color, 0, 1) >= 3
+}
+
+// extend 统计若 p 处棋子为 color，含 p 沿 (dCol, dRow) 两端的最大连续数。
+func (b Board) extend(p Pos, color Tile, dCol, dRow int) int {
+	n := 1
+	for next := (Pos{Col: p.Col + dCol, Row: p.Row + dRow}); b.contains(next) && b.At(next) == color; next = (Pos{Col: next.Col + dCol, Row: next.Row + dRow}) {
+		n++
+	}
+	for next := (Pos{Col: p.Col - dCol, Row: p.Row - dRow}); b.contains(next) && b.At(next) == color; next = (Pos{Col: next.Col - dCol, Row: next.Row - dRow}) {
+		n++
+	}
+	return n
 }
 
 func (b Board) contains(p Pos) bool {

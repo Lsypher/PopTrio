@@ -10,10 +10,11 @@ import (
 // "同一棋盘 + 同一随机序列 → 同一结果" 为准。
 type TileRNG func(colors int) Tile
 
-// Wave 是连锁中的一波结算：一次消除及其得分。
+// Wave 是连锁中的一波结算：一次消除及其得分与落定后的棋盘。
 type Wave struct {
 	Clear Clear // 本波消除的棋子（去重、行优先）
 	Score int   // 本波得分，等于 len(Clear.Cells)
+	Board Board // 本波消除并结算（下落 + 补充）后的棋盘；最后一波即 CascadeResult.Board
 }
 
 // CascadeResult 是一次 Swap 触发的全部连锁波次的结算结果。
@@ -76,9 +77,9 @@ func ApplySwap(b Board, s Swap, operator string, rand TileRNG) (CascadeResult, b
 		if !ok {
 			break
 		}
-		waves = append(waves, Wave{Clear: clear, Score: clear.Score()})
-		total += clear.Score()
 		cur = cur.Settle(clear, rand)
+		waves = append(waves, Wave{Clear: clear, Score: clear.Score(), Board: cur})
+		total += clear.Score()
 	}
 	if len(waves) == 0 {
 		return CascadeResult{}, false // 无效交换：回弹，棋盘不变

@@ -13,3 +13,7 @@
 - [ ] HTTP 健康检查可用
 - [ ] 排队超时时长为配置项
 - [ ] go test 全绿（含脚本客户端对局冒烟测试）
+
+## Comments
+
+- 2026-09-28：自 issue 03 交接——`room.Room` 在 Settlement 后 `Run` 返回，`cmds` channel 不再被消费；此后 `SubmitSwap/SubmitDeadline` 仅能再入队 64 笔缓冲，超出即阻塞投递方。WS 泵接线时须在终局后停止向房间投递（或经 `room` 包后续提供的完成信号感知终局），避免玩家在结算瞬间连发消息卡死读泵。

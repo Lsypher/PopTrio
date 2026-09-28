@@ -176,6 +176,11 @@ func TestApplySwapSettlesAllCascadeWaves(t *testing.T) {
 		}
 		total += wave.Score
 	}
+	// 每波携带落定后棋盘：波与波首尾相接，最后一波即最终棋盘。
+	if slices.Equal(res.Waves[0].Board.Tiles, res.Waves[1].Board.Tiles) ||
+		!slices.Equal(res.Waves[1].Board.Tiles, res.Board.Tiles) {
+		t.Fatal("per-wave boards do not chain wave 0 -> wave 1 -> final")
+	}
 	if res.TotalScore != total || res.TotalScore != 6 {
 		t.Fatalf("TotalScore = %d, want sum of waves = 6", res.TotalScore)
 	}

@@ -69,8 +69,13 @@ func (h *Hub) Handler() http.Handler {
 }
 
 // serveWS 升级连接并运行 session 直至连接结束。
+//
+// 客户端为任意源的静态托管页（端口即与 ws 端点不同源），且端点不携带
+// Cookie 等环境凭据、对局 token 逐局私发——CSWSH 无可窃取面，故跳过
+// 库默认的 Origin 校验（coder/websocket v1.8.15 起跨源默认 403）。
+// 引入凭据或收紧部署拓扑时应改为显式 OriginPatterns 白名单。
 func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, nil)
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
 	}

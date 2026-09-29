@@ -182,6 +182,7 @@ type Wave struct {
 // SwapResultMsg 是一次有效交换的结果。
 type SwapResultMsg struct {
 	Operator int    `json:"operator"`
+	Swap     Swap   `json:"swap"` // 被接受的交换回显：客户端据此重放交换动画（双方一致，零反推）
 	Waves    []Wave `json:"waves"`
 	Board    []int  `json:"board"`
 	Scores   [2]int `json:"scores"`
@@ -209,8 +210,10 @@ type SettlementMsg struct {
 }
 
 // MatchTokenMsg 是对局重连凭据，经各自连接私发（不随广播帧下发）。
+// Seat 是接收方座位：客户端据此区分己方/对方，禁用非本方回合的输入。
 type MatchTokenMsg struct {
 	Token string `json:"token"`
+	Seat  int    `json:"seat"`
 }
 
 // ReconnectedMsg 是重连成功回执：全量快照恢复对局（ADR-0003）。
@@ -244,6 +247,7 @@ func FromRoom(f room.Frame) (string, any) {
 		}
 		return TypeSwapResult, SwapResultMsg{
 			Operator: v.Operator,
+			Swap:     Swap{A: Pos{Col: v.Swap.A.Col, Row: v.Swap.A.Row}, B: Pos{Col: v.Swap.B.Col, Row: v.Swap.B.Row}},
 			Waves:    waves,
 			Board:    tileMsgs(v.Board),
 			Scores:   v.Scores,

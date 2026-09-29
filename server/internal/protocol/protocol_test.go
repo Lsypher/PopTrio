@@ -173,6 +173,7 @@ func TestFromRoomTurnStarted(t *testing.T) {
 func TestFromRoomSwapResult(t *testing.T) {
 	typ, payload := roomRoundTrip(t, room.SwapResultFrame{
 		Operator: 1,
+		Swap:     judge.Swap{A: judge.Pos{Col: 4, Row: 2}, B: judge.Pos{Col: 4, Row: 3}},
 		Waves: []room.WaveView{
 			{Clear: []judge.Pos{{Col: 0, Row: 0}, {Col: 1, Row: 0}}, Score: 2, Board: []judge.Tile{1, 1}},
 		},
@@ -184,6 +185,7 @@ func TestFromRoomSwapResult(t *testing.T) {
 	}
 	var msg struct {
 		Operator int             `json:"operator"`
+		Swap     protocol.Swap   `json:"swap"`
 		Waves    []protocol.Wave `json:"waves"`
 		Board    []int           `json:"board"`
 		Scores   [2]int          `json:"scores"`
@@ -193,6 +195,9 @@ func TestFromRoomSwapResult(t *testing.T) {
 	}
 	if msg.Operator != 1 || msg.Scores != [2]int{0, 2} || !slices.Equal(msg.Board, []int{1, 1}) {
 		t.Fatalf("swap result = %+v, want operator 1 scores [0 2] board [1 1]", msg)
+	}
+	if msg.Swap != (protocol.Swap{A: protocol.Pos{Col: 4, Row: 2}, B: protocol.Pos{Col: 4, Row: 3}}) {
+		t.Fatalf("swap echo = %+v, want (4,2)<->(4,3)", msg.Swap)
 	}
 	if len(msg.Waves) != 1 {
 		t.Fatalf("waves = %d, want 1", len(msg.Waves))

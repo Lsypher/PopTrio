@@ -64,6 +64,7 @@ type WaveView struct {
 // SwapResultFrame 是一次有效交换的结果帧（ADR-0003：交换结果帧）。
 type SwapResultFrame struct {
 	Operator int          // 得分归属方座位（Attribution：全部波次归操作者）
+	Swap     judge.Swap   // 被接受的交换原样回显：双方据此重放交换动画，零反推
 	Waves    []WaveView   // 按结算顺序排列的全部连锁波次
 	Board    []judge.Tile // 全部波次结算后的最终棋盘
 	Scores   [2]int       // 结算后双方累计得分

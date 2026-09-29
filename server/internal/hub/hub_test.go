@@ -193,6 +193,9 @@ func TestScriptedClientsFullMatch(t *testing.T) {
 	if tok1.Token == "" || tok2.Token == "" || tok1.Token == tok2.Token {
 		t.Fatalf("match tokens = %q / %q, want non-empty and distinct", tok1.Token, tok2.Token)
 	}
+	if tok1.Seat != 0 || tok2.Seat != 1 {
+		t.Fatalf("token seats = %d / %d, want 0 / 1", tok1.Seat, tok2.Seat)
+	}
 
 	// 双方收到 match_started：座位表、先手与回合 1 快照，快照逐字段一致。
 	var m1, m2 protocol.MatchStartedMsg

@@ -69,6 +69,8 @@ export interface Snapshot {
 
 export interface MatchTokenPayload {
   token: string;
+  /** 接收方座位（0/1）：私有帧附带，客户端据此区分己方回合。 */
+  seat: number;
 }
 
 export interface MatchStartedPayload {
@@ -90,6 +92,8 @@ export interface Wave {
 
 export interface SwapResultPayload {
   operator: number;
+  /** 被接受的交换回显：双方据此重放交换动画，零反推（对手交换实时可见）。 */
+  swap: SwapPayload;
   waves: Wave[];
   board: number[];
   scores: [number, number];

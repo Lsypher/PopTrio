@@ -125,9 +125,10 @@ func (h *Hub) startMatch(match *matchmaker.Matchup) {
 	h.mu.Unlock()
 	s0.rm = &b0.rm
 	s1.rm = &b1.rm
-	// 对局 token 由匹配层签发、经各自连接私发，绝不广播（issue 04 约定）。
-	s0.send(protocol.TypeMatchToken, protocol.MatchTokenMsg{Token: tokens[0]})
-	s1.send(protocol.TypeMatchToken, protocol.MatchTokenMsg{Token: tokens[1]})
+	// 对局 token 由匹配层签发、经各自连接私发，绝不广播（issue 04 约定）；
+	// seat 随 token 同一私有帧下发，客户端据此区分己方回合。
+	s0.send(protocol.TypeMatchToken, protocol.MatchTokenMsg{Token: tokens[0], Seat: 0})
+	s1.send(protocol.TypeMatchToken, protocol.MatchTokenMsg{Token: tokens[1], Seat: 1})
 	go r.Run()
 }
 

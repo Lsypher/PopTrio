@@ -239,6 +239,7 @@ func (r *Room) handleSwap(c swapCmd) {
 	r.scores[c.seat] += res.TotalScore // Attribution：全部波次归操作者
 	r.emit(SwapResultFrame{
 		Operator: c.seat,
+		Swap:     c.swap,
 		Waves:    waveViews(res.Waves),
 		Board:    res.Board.Tiles,
 		Scores:   r.scores,

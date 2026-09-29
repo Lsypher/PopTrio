@@ -12,7 +12,7 @@ import {
   _decorator,
 } from 'cc';
 import { ensureStage } from '../core/Stage';
-import { applySessionMessage } from '../core/MatchSession';
+import { applySessionMessage, matchSession } from '../core/MatchSession';
 import { net } from '../net/NetClient';
 import {
   CODE_BAD_STATE,
@@ -86,6 +86,11 @@ export class LobbyUI extends Component {
     this.enterIdle('点击「开始匹配」寻找对手');
     this.unsubMessage = net.onMessage(this.handleMessage);
     this.unsubClose = net.onClose(this.handleClose);
+    // 再战入口（issue 08）：结算画面点「再战」切回大厅即自动重新排队。
+    if (matchSession.autoQueue) {
+      matchSession.autoQueue = false;
+      this.startQueue();
+    }
   }
 
   onDestroy() {

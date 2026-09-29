@@ -119,3 +119,9 @@ export class NetClient {
 
 /** 全局单例：跨场景共享同一条 WS 连接。 */
 export const net = new NetClient();
+
+// 断线演练辅助（issue 08 验收）：页面带 ?debug=1 时把连接单例挂到 window，
+// 供自动化脚本强制断线、驱动重连恢复流程。正常游玩零行为差异。
+if (typeof window !== 'undefined' && typeof window.location !== 'undefined' && new URLSearchParams(window.location.search).has('debug')) {
+  (window as unknown as { __poptrioNet?: NetClient }).__poptrioNet = net;
+}

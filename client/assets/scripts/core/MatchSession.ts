@@ -27,6 +27,8 @@ export interface MatchSessionState {
   active: boolean;
   /** 终局结果（settlement 到达后非空）。 */
   settlement: SettlementPayload | null;
+  /** 再战入口：结算画面点「再战」后置位，大厅场景载入即自动重新排队。 */
+  autoQueue: boolean;
 }
 
 export const matchSession: MatchSessionState = {
@@ -35,6 +37,7 @@ export const matchSession: MatchSessionState = {
   mySeat: null,
   active: false,
   settlement: null,
+  autoQueue: false,
 };
 
 /** 中心分发：把会话级消息沉淀到单例。场景 UI 另行订阅做界面响应。 */
@@ -55,6 +58,10 @@ export function applySessionMessage(msg: ServerMessage): void {
   } else if (msg.type === MSG_RECONNECTED) {
     const p = msg.payload as ReconnectedPayload;
     matchSession.snapshot = p.snapshot;
-    matchSession.mySeat = p.seat;
+    // reconnected 由房间广播（重连方与对手都会收到）：座位信息在
+    // match_token 私发帧已沉淀，这里仅在未知时兜底，防止对手帧覆盖己方座位。
+    if (matchSession.mySeat === null) {
+      matchSession.mySeat = p.seat;
+    }
   }
 }

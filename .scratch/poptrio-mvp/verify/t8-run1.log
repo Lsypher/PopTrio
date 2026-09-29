@@ -1,0 +1,21 @@
+=== t8 run1 ===
+[16:39:03.389] stage0: fresh windows (script v4, mtime 16:38:57)
+[16:39:06.888]   abExe=C:\Users\nxm\AppData\Roaming\npm\node_modules\agent-browser\bin\agent-browser-win32-x64.exe (exists=True)
+[16:39:16.216]   open pta ready=True rs=true
+[16:39:25.359]   open ptb ready=True rs=true
+[16:39:28.369]   installing helpers on pta
+[16:39:28.562]   pta bridge=object
+[16:39:28.565]   installing helpers on ptb
+[16:39:28.756]   ptb bridge=object
+[16:39:28.760] stage1: queue both
+[16:39:31.226]   pta match_started ok (poll 1)
+[16:39:32.009]   ptb match_started ok (poll 1)
+[16:39:32.136]   pta seat=0
+[16:39:32.248]   ptb seat=1
+[16:39:32.251] stage2: warm-up turns
+[16:39:40.578]   ptb waitTurn8 -> 2,-204,232,-204,164
+[16:39:40.588]   ptb play turn 2
+[16:40:00.486]   ptb waitTurn8 -> 4,68,232,136,232
+[16:40:00.489]   ptb play turn 4
+[16:40:02.009] stage3: A force drop
+[16:40:25.591]   pta reconnected FAILED

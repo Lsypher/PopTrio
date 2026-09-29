@@ -7,11 +7,15 @@
 // 快照（turn_started）是天然对账点：无条件硬同步到快照（清队列、重绘、
 // 重置未决状态）。任何时刻屏幕表现最终都与服务端快照可对账。
 import {
+  Button,
   Color,
   Component,
+  director,
+  Graphics,
   Label,
   Node,
   SpriteFrame,
+  UITransform,
   _decorator,
 } from 'cc';
 import { ensureStage } from '../core/Stage';
@@ -21,6 +25,7 @@ import {
   ErrorPayload,
   MSG_ERROR,
   MSG_RECONNECTED,
+  MSG_RECONNECT_REJECTED,
   MSG_RESHUFFLE,
   MSG_SETTLEMENT,
   MSG_SWAP_REJECTED,
@@ -28,17 +33,20 @@ import {
   MSG_TURN_STARTED,
   Pos,
   ReconnectedPayload,
+  ReconnectRejectedPayload,
   ServerMessage,
   SettlementPayload,
   Snapshot,
   SwapRejectedPayload,
   SwapResultPayload,
   Wave,
+  encodeReconnect,
   encodeSwap,
 } from '../protocol/Protocol';
 import { BoardInput } from './BoardInput';
 import { BoardView, Cell } from './BoardView';
 import { loadFruitFrames } from './FruitSprites';
+import { SettlementView } from './SettlementView';
 import { TurnClock } from './TurnClock';
 
 const { ccclass } = _decorator;
@@ -47,6 +55,14 @@ const SWAP_SECONDS = 0.14;
 const COLOR_TEXT = new Color(235, 235, 235, 255);
 const COLOR_MUTED = new Color(150, 150, 155, 255);
 const COLOR_URGENT = new Color(255, 96, 88, 255);
+const COLOR_BTN = new Color(0, 144, 255, 255);
+const COLOR_BTN_TEXT = new Color(255, 255, 255, 255);
+
+// 重连节奏：宽限期 60s（服务端配置）内每 2s 一试；带内响应兜底超时后重试；
+// 超过宽限期仍失败即放弃（绑定已随判负结算摘除，重试无意义）。
+const RECONNECT_INTERVAL_MS = 2_000;
+const RECONNECT_RESPONSE_MS = 5_000;
+const RECONNECT_GIVEUP_MS = 70_000;
 
 /** 交换请求（坐标对）。 */
 interface SwapLike {
@@ -100,8 +116,15 @@ export class MatchUI extends Component {
   private board: BoardView | null = null;
   private input: BoardInput | null = null;
   private clock = new TurnClock();
+  private settlementView: SettlementView | null = null;
+  private exitButton: Node | null = null;
   private unsubMessage: (() => void) | null = null;
   private unsubClose: (() => void) | null = null;
+
+  // —— 断线重连（issue 08）：对局中断线即凭 token 自动重连恢复 ——
+  private reconnecting = false;
+  private reconnectTimer: number | null = null;
+  private reconnectGiveUpAt = 0;
 
   // —— 服务端确认状态（仅随权威帧/快照更新）——
   private scores: [number, number] = [0, 0];
@@ -138,8 +161,13 @@ export class MatchUI extends Component {
     this.statusLabel = this.makeLabel(canvas, 'Status', '', 36, COLOR_TEXT);
     this.statusLabel.node.setPosition(0, -560);
 
+    this.settlementView = new SettlementView(canvas, {
+      onRematch: this.rematch,
+      onLobby: this.backToLobby,
+    });
+
     this.unsubMessage = net.onMessage(this.handleMessage);
-    this.unsubClose = this.netClose;
+    this.unsubClose = net.onClose(this.netClose);
     void this.initBoard();
   }
 
@@ -152,12 +180,19 @@ export class MatchUI extends Component {
       this.unsubClose();
       this.unsubClose = null;
     }
+    this.stopReconnect();
   }
 
   private netClose = () => {
-    if (this.isValid) {
-      this.setStatus('连接已断开');
+    if (!this.isValid) {
+      return;
     }
+    // 对局中断线（终局后服务端正常关连不在此列）：凭 token 自动重连恢复。
+    if (this.settled || !matchSession.active || !matchSession.token) {
+      this.setStatus('连接已断开');
+      return;
+    }
+    this.startReconnect();
   };
 
   /** 素材加载完成后装配棋盘与输入，再冲刷初始化期间缓存的消息。 */
@@ -179,7 +214,7 @@ export class MatchUI extends Component {
 
     const snapshot = matchSession.snapshot;
     if (snapshot) {
-      this.resync(snapshot);
+      this.resync(snapshot, true); // 场景载入即 match_started：窗口刚开始
       if (matchSession.settlement) {
         this.renderSettlement(matchSession.settlement);
       }
@@ -231,7 +266,7 @@ export class MatchUI extends Component {
     switch (msg.type) {
       case MSG_TURN_STARTED:
         // 回合边界快照：硬对账点（清队列/重置未决/全量重绘/重校倒计时）。
-        this.resync(msg.payload.snapshot);
+        this.resync(msg.payload.snapshot, true);
         break;
       case MSG_SWAP_RESULT: {
         const p = msg.payload as SwapResultPayload;
@@ -273,8 +308,18 @@ export class MatchUI extends Component {
         break;
       }
       case MSG_RECONNECTED: {
+        // 重连恢复（房间广播，对手也会收到）：全量快照硬同步，倒计时走
+        // 窗口中途恢复路径（不重估时钟偏移）。
+        this.stopReconnect();
         const p = msg.payload as ReconnectedPayload;
-        this.resync(p.snapshot);
+        this.resync(p.snapshot, false);
+        break;
+      }
+      case MSG_RECONNECT_REJECTED: {
+        const p = msg.payload as ReconnectRejectedPayload;
+        this.stopReconnect();
+        this.setStatus(`重连被拒：${p.reason}`);
+        this.showExitButton();
         break;
       }
       case MSG_SETTLEMENT:
@@ -282,7 +327,13 @@ export class MatchUI extends Component {
         break;
       case MSG_ERROR: {
         const p = msg.payload as ErrorPayload;
-        this.setStatus(`错误：${p.message}`);
+        // 重连中的错误帧（如旧连接尚未清理时的 bad_token）按可重试处理，
+        // 由重连循环的放弃兜底终结；其余正常展示。
+        if (this.reconnecting) {
+          this.scheduleRetry();
+        } else {
+          this.setStatus(`错误：${p.message}`);
+        }
         break;
       }
       default:
@@ -423,7 +474,9 @@ export class MatchUI extends Component {
 
   // ---- 快照硬同步 ----
 
-  private resync(snapshot: Snapshot) {
+  /** freshWindow：快照是否恰逢回合窗口刚开始（match_started / turn_started）。
+   *  重连恢复快照落在本回合中途，倒计时不重估时钟偏移（见 TurnClock）。 */
+  private resync(snapshot: Snapshot, freshWindow: boolean) {
     this.epoch++; // 旧播放循环与旧动画全部让位
     this.queue = [];
     this.playing = false;
@@ -432,7 +485,11 @@ export class MatchUI extends Component {
     this.scores = [snapshot.scores[0], snapshot.scores[1]];
     this.turn = snapshot.turn;
     this.operator = snapshot.operator;
-    this.clock.sync(snapshot.deadline);
+    if (freshWindow) {
+      this.clock.syncWindowStart(snapshot.deadline);
+    } else {
+      this.clock.resnap(snapshot.deadline);
+    }
     this.board?.build(snapshot.board);
     this.board?.setSelected(null);
     this.input?.clearSelection();
@@ -444,10 +501,110 @@ export class MatchUI extends Component {
   private renderSettlement(p: SettlementPayload) {
     this.settled = true;
     this.scores = [p.scores[0], p.scores[1]];
-    const outcome = p.draw ? '平局' : `P${p.winner} 胜`;
     this.renderHud();
-    this.setStatus(`终局 · ${outcome}`);
+    this.stopReconnect();
+    this.settlementView?.show(p, this.mySeat);
   }
+
+  // ---- 断线重连（issue 08）----
+
+  private startReconnect() {
+    if (this.reconnecting) {
+      return;
+    }
+    this.reconnecting = true;
+    this.reconnectGiveUpAt = Date.now() + RECONNECT_GIVEUP_MS;
+    this.setStatus('连接断开，正在重连…');
+    this.attemptReconnect();
+  }
+
+  private attemptReconnect = () => {
+    if (!this.isValid || !this.reconnecting || this.settled) {
+      return;
+    }
+    if (Date.now() >= this.reconnectGiveUpAt) {
+      this.giveUpReconnect();
+      return;
+    }
+    net.connect()
+      .then(() => {
+        if (!this.isValid || !this.reconnecting || this.settled) {
+          return;
+        }
+        // 服务端校验 token 后回 reconnected（全量快照）或错误帧；本方法
+        // 不等待回帧——由 scheduleRetry 兜底重试，帧到达时停止循环。
+        if (!net.send(encodeReconnect(matchSession.token))) {
+          this.scheduleRetry();
+          return;
+        }
+        this.scheduleRetry(RECONNECT_RESPONSE_MS);
+      })
+      .catch(() => {
+        if (this.isValid && this.reconnecting && !this.settled) {
+          this.scheduleRetry();
+        }
+      });
+  };
+
+  /** 安排下一次重连尝试；已有在途定时器时幂等（帧兜底与错误帧竞争无副作用）。 */
+  private scheduleRetry(delayMs = RECONNECT_INTERVAL_MS) {
+    if (!this.reconnecting || this.reconnectTimer !== null) {
+      return;
+    }
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.attemptReconnect();
+    }, delayMs);
+  }
+
+  private stopReconnect() {
+    this.reconnecting = false;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  /** 宽限期耗尽仍连不上：绑定已随判负结算摘除，提供返回大厅出口。 */
+  private giveUpReconnect() {
+    this.stopReconnect();
+    this.setStatus('重连失败：对局已结束');
+    this.showExitButton();
+  }
+
+  private showExitButton() {
+    if (this.exitButton || !this.statusLabel) {
+      return;
+    }
+    const node = new Node('ExitToLobby');
+    node.layer = this.statusLabel.node.layer;
+    node.parent = this.statusLabel.node.parent!;
+    node.addComponent(UITransform).setContentSize(280, 96);
+    const g = node.addComponent(Graphics);
+    g.fillColor = COLOR_BTN;
+    g.roundRect(-140, -48, 280, 96, 48);
+    g.fill();
+    const label = this.makeLabel(node, 'Label', '返回大厅', 32, COLOR_BTN_TEXT);
+    label.node.setPosition(0, 0);
+    const button = node.addComponent(Button);
+    button.target = node;
+    button.transition = Button.Transition.NONE;
+    node.on(Button.EventType.CLICK, this.backToLobby);
+    node.setPosition(0, -440);
+    this.exitButton = node;
+  }
+
+  // ---- 结算出口 ----
+
+  private rematch = () => {
+    matchSession.autoQueue = true;
+    director.loadScene('Lobby');
+  };
+
+  private backToLobby = () => {
+    matchSession.autoQueue = false;
+    director.loadScene('Lobby');
+  };
 
   // ---- HUD ----
 

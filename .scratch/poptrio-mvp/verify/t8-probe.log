@@ -1,4 +1,0 @@
-=== probe ===
-[15:22:03] pta <- "{\"url\":\"/?debug=1\",\"bridge\":\"object\",\"frames\":9,\"helpers\":\"undefined\"}"
-[15:22:03] ptb <- "{\"url\":\"/?debug=1\",\"bridge\":\"object\",\"frames\":7,\"helpers\":\"undefined\"}"
-[15:22:03] probe done

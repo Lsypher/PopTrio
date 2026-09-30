@@ -198,14 +198,16 @@ export class BoardView {
     this.tiles[b.row][b.col] = ta;
   }
 
-  /** 簿记交换 + 双向 tween 动画：结果帧重放的交换路径。 */
+  /** 簿记交换 + 双向 tween 动画：结果帧重放的交换路径。
+   *  必须先捕获 tile 引用再 confirmSwap——簿记交换后 tiles[a]/tiles[b]
+   *  已指向对侧棋子，再取引用会 tween 向自身当前位置（零位移空动画）。 */
   async animateSwap(a: Cell, b: Cell): Promise<void> {
-    this.confirmSwap(a, b);
     const ta = this.tiles[a.row][a.col];
     const tb = this.tiles[b.row][b.col];
     if (!ta || !tb) {
       return;
     }
+    this.confirmSwap(a, b);
     await Promise.all([
       tweenTo(ta.node, cellToLocal(b.col, b.row), SWAP_SECONDS),
       tweenTo(tb.node, cellToLocal(a.col, a.row), SWAP_SECONDS),

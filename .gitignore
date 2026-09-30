@@ -1,6 +1,3 @@
-# 构建二进制产物
-*.exe
-
 # Agent 工作区(仅保留 issue md)
 .scratch/**
 !.scratch/**/

@@ -174,7 +174,8 @@ export class MatchUI extends Component {
   }
 
   onDestroy() {
-    this.exitButton?.node.off(Button.EventType.CLICK, this.backToLobby);
+    // 场景销毁先拆子节点再拆自身组件：exitButton 可能已被析构（node 被引擎置回 null），须再判空。
+    this.exitButton?.node?.off(Button.EventType.CLICK, this.backToLobby);
     if (this.unsubMessage) {
       this.unsubMessage();
       this.unsubMessage = null;

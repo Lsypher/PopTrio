@@ -45,8 +45,9 @@ export class SettlementView extends Component {
   }
 
   onDestroy() {
-    this.rematchButton?.node.off(Button.EventType.CLICK, this.emitRematch);
-    this.lobbyButton?.node.off(Button.EventType.CLICK, this.emitLobby);
+    // 场景销毁先拆子节点再拆自身组件：按钮可能已被析构（node 被引擎置回 null），须再判空。
+    this.rematchButton?.node?.off(Button.EventType.CLICK, this.emitRematch);
+    this.lobbyButton?.node?.off(Button.EventType.CLICK, this.emitLobby);
   }
 
   private emitRematch = () => {

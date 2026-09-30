@@ -14,7 +14,7 @@ import { SettlementPayload } from '../protocol/Protocol';
 const { ccclass, property } = _decorator;
 
 const COLOR_WIN = new Color(255, 214, 90, 255);
-const COLOR_LOSE = new Color(170, 170, 178, 255);
+const COLOR_LOSE = new Color(220, 220, 228, 255);
 const COLOR_DRAW = new Color(235, 235, 235, 255);
 
 export interface SettlementHooks {

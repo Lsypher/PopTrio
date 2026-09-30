@@ -1,91 +1,61 @@
 // 结算画面（issue 08）：终局全屏遮罩——胜/负/Draw 判定（本方视角）、双方
-// 终分、再战（重新进入 Queue）与返回大厅入口。纯表现组件：结果与分数全部
-// 来自服务端 settlement 帧，由 MatchUI 在收到该帧时唤起（ADR-0001）。
+// 终分、再战（重新进入 Queue）与返回大厅入口。UI 骨架为 SettlementView.prefab
+// （ADR-0005），本组件只驱动行为：结果与分数全部来自服务端 settlement 帧，
+// 由 MatchUI 在收到该帧时唤起（ADR-0001）。
 import {
-  BlockInputEvents,
   Button,
   Color,
-  Graphics,
+  Component,
   Label,
-  Node,
-  UITransform,
+  _decorator,
 } from 'cc';
 import { SettlementPayload } from '../protocol/Protocol';
+
+const { ccclass, property } = _decorator;
 
 const COLOR_WIN = new Color(255, 214, 90, 255);
 const COLOR_LOSE = new Color(170, 170, 178, 255);
 const COLOR_DRAW = new Color(235, 235, 235, 255);
-const COLOR_TEXT = new Color(235, 235, 235, 255);
-const COLOR_MUTED = new Color(150, 150, 155, 255);
-const COLOR_BTN = new Color(0, 144, 255, 255);
-const COLOR_BTN_TEXT = new Color(255, 255, 255, 255);
 
 export interface SettlementHooks {
   onRematch: () => void;
   onLobby: () => void;
 }
 
-function makeLabel(parent: Node, name: string, text: string, fontSize: number, color: Color): Label {
-  const node = new Node(name);
-  node.layer = parent.layer;
-  node.parent = parent;
-  const label = node.addComponent(Label);
-  label.string = text;
-  label.fontSize = fontSize;
-  label.lineHeight = Math.round(fontSize * 1.3);
-  label.color = color;
-  return label;
-}
+@ccclass('SettlementView')
+export class SettlementView extends Component {
+  @property(Label)
+  private outcomeLabel: Label | null = null;
 
-function makeButton(parent: Node, name: string, text: string, onClick: () => void): Node {
-  const width = 280;
-  const height = 104;
-  const node = new Node(name);
-  node.layer = parent.layer;
-  node.parent = parent;
-  node.addComponent(UITransform).setContentSize(width, height);
-  const g = node.addComponent(Graphics);
-  g.fillColor = COLOR_BTN;
-  g.roundRect(-width / 2, -height / 2, width, height, height / 2);
-  g.fill();
-  makeLabel(node, 'Label', text, 36, COLOR_BTN_TEXT);
-  const button = node.addComponent(Button);
-  button.target = node;
-  button.transition = Button.Transition.NONE;
-  node.on(Button.EventType.CLICK, onClick);
-  return node;
-}
+  @property(Label)
+  private scoresLabel: Label | null = null;
 
-export class SettlementView {
-  private root: Node;
-  private titleLabel: Label;
-  private scoreLabel: Label;
+  @property(Button)
+  private rematchButton: Button | null = null;
 
-  constructor(parent: Node, hooks: SettlementHooks) {
-    this.root = new Node('Settlement');
-    this.root.layer = parent.layer;
-    this.root.parent = parent;
-    // 全屏遮罩：吞掉触摸，防止结算后仍操作棋盘。
-    this.root.addComponent(UITransform);
-    this.root.addComponent(BlockInputEvents);
-    const dim = this.root.addComponent(Graphics);
-    dim.fillColor = new Color(0, 0, 0, 170);
-    dim.roundRect(-2400, -2400, 4800, 4800, 0);
-    dim.fill();
+  @property(Button)
+  private lobbyButton: Button | null = null;
 
-    this.titleLabel = makeLabel(this.root, 'Outcome', '', 96, COLOR_DRAW);
-    this.titleLabel.node.setPosition(0, 200);
-    this.scoreLabel = makeLabel(this.root, 'Scores', '', 52, COLOR_TEXT);
-    this.scoreLabel.node.setPosition(0, 60);
-    makeLabel(this.root, 'Hint', '双方终分', 30, COLOR_MUTED).node.setPosition(0, -16);
+  /** 出口回调由 MatchUI 注入：场景跳转策略归对局所有，表现组件不持有。 */
+  hooks: SettlementHooks | null = null;
 
-    const rematch = makeButton(this.root, 'Rematch', '再战', hooks.onRematch);
-    rematch.setPosition(-170, -180);
-    const lobby = makeButton(this.root, 'Lobby', '返回大厅', hooks.onLobby);
-    lobby.setPosition(170, -180);
-
-    this.root.active = false;
+  onLoad() {
+    this.rematchButton?.node.on(Button.EventType.CLICK, this.emitRematch);
+    this.lobbyButton?.node.on(Button.EventType.CLICK, this.emitLobby);
   }
+
+  onDestroy() {
+    this.rematchButton?.node.off(Button.EventType.CLICK, this.emitRematch);
+    this.lobbyButton?.node.off(Button.EventType.CLICK, this.emitLobby);
+  }
+
+  private emitRematch = () => {
+    this.hooks?.onRematch();
+  };
+
+  private emitLobby = () => {
+    this.hooks?.onLobby();
+  };
 
   /** 展示结算：结果与双方终分按本方座位呈现（座位未知时退化为中立视角）。 */
   show(p: SettlementPayload, mySeat: number | null) {
@@ -104,10 +74,14 @@ export class SettlementView {
       title = '失败';
       color = COLOR_LOSE;
     }
-    this.titleLabel.string = title;
-    this.titleLabel.color = color;
-    this.scoreLabel.string =
-      mySeat === 1 ? `你 ${p.scores[1]} : ${p.scores[0]} 对手` : `你 ${p.scores[0]} : ${p.scores[1]} 对手`;
-    this.root.active = true;
+    if (this.outcomeLabel) {
+      this.outcomeLabel.string = title;
+      this.outcomeLabel.color = color;
+    }
+    if (this.scoresLabel) {
+      this.scoresLabel.string =
+        mySeat === 1 ? `你 ${p.scores[1]} : ${p.scores[0]} 对手` : `你 ${p.scores[0]} : ${p.scores[1]} 对手`;
+    }
+    this.node.active = true;
   }
 }

@@ -6,19 +6,18 @@
 // 状态），收到结果帧后续播消除/下落/连锁，收到否决帧则回弹。回合边界
 // 快照（turn_started）是天然对账点：无条件硬同步到快照（清队列、重绘、
 // 重置未决状态）。任何时刻屏幕表现最终都与服务端快照可对账。
+// UI 骨架由编辑器搭建（ADR-0005），本组件只驱动行为；Board 的 Tile/Slot
+// 仍由 BoardView 在运行时动态生成。
 import {
   Button,
   Color,
   Component,
   director,
-  Graphics,
   Label,
   Node,
   SpriteFrame,
-  UITransform,
   _decorator,
 } from 'cc';
-import { ensureStage } from '../core/Stage';
 import { applySessionMessage, matchSession } from '../core/MatchSession';
 import { net } from '../net/NetClient';
 import {
@@ -49,14 +48,11 @@ import { loadFruitFrames } from './FruitSprites';
 import { SettlementView } from './SettlementView';
 import { TurnClock } from './TurnClock';
 
-const { ccclass } = _decorator;
+const { ccclass, property } = _decorator;
 
 const SWAP_SECONDS = 0.14;
 const COLOR_TEXT = new Color(235, 235, 235, 255);
-const COLOR_MUTED = new Color(150, 150, 155, 255);
 const COLOR_URGENT = new Color(255, 96, 88, 255);
-const COLOR_BTN = new Color(0, 144, 255, 255);
-const COLOR_BTN_TEXT = new Color(255, 255, 255, 255);
 
 // 重连节奏：宽限期 60s（服务端配置）内每 2s 一试；带内响应兜底超时后重试；
 // 超过宽限期仍失败即放弃（绑定已随判负结算摘除，重试无意义）。
@@ -108,16 +104,36 @@ function rejectText(reason: string): string {
 
 @ccclass('MatchUI')
 export class MatchUI extends Component {
+  @property(Label)
   private scoreLabel: Label | null = null;
+
+  @property(Label)
   private turnLabel: Label | null = null;
+
+  @property(Label)
   private countdownLabel: Label | null = null;
+
+  @property(Label)
   private statusLabel: Label | null = null;
+
+  /** 棋盘宿主：BoardView/BoardInput 在其下动态生成 Tile/Slot。 */
+  @property(Node)
   private boardHost: Node | null = null;
+
+  /** 重连失败出口，默认隐藏，仅在宽限期耗尽/重连被拒时显示。 */
+  @property(Button)
+  private exitButton: Button | null = null;
+
+  /** 结算面板：SettlementView.prefab 实例，默认隐藏。压缩实例内部的组件
+   *  无法被场景 JSON 直接引用（ADR-0005 备注），故引用根节点运行时取组件。 */
+  @property(Node)
+  private settlementRoot: Node | null = null;
+
+  private settlement: SettlementView | null = null;
+
   private board: BoardView | null = null;
   private input: BoardInput | null = null;
   private clock = new TurnClock();
-  private settlementView: SettlementView | null = null;
-  private exitButton: Node | null = null;
   private unsubMessage: (() => void) | null = null;
   private unsubClose: (() => void) | null = null;
 
@@ -144,34 +160,21 @@ export class MatchUI extends Component {
   private ready = false;
 
   onLoad() {
-    const canvas = ensureStage();
-    this.scoreLabel = this.makeLabel(canvas, 'Score', '', 56, COLOR_TEXT);
-    this.scoreLabel.node.setPosition(0, 560);
-    this.turnLabel = this.makeLabel(canvas, 'Turn', '', 32, COLOR_MUTED);
-    this.turnLabel.node.setPosition(0, 492);
-    this.countdownLabel = this.makeLabel(canvas, 'Countdown', '', 44, COLOR_TEXT);
-    this.countdownLabel.node.setPosition(0, 436);
-    this.countdownLabel.node.active = false;
-
-    this.boardHost = new Node('Board');
-    this.boardHost.layer = canvas.layer;
-    this.boardHost.parent = canvas;
-    this.boardHost.setPosition(0, -40);
-
-    this.statusLabel = this.makeLabel(canvas, 'Status', '', 36, COLOR_TEXT);
-    this.statusLabel.node.setPosition(0, -560);
-
-    this.settlementView = new SettlementView(canvas, {
-      onRematch: this.rematch,
-      onLobby: this.backToLobby,
-    });
-
+    this.exitButton?.node.on(Button.EventType.CLICK, this.backToLobby);
+    this.settlement = this.settlementRoot?.getComponent(SettlementView) ?? null;
+    if (this.settlement) {
+      this.settlement.hooks = {
+        onRematch: this.rematch,
+        onLobby: this.backToLobby,
+      };
+    }
     this.unsubMessage = net.onMessage(this.handleMessage);
     this.unsubClose = net.onClose(this.netClose);
     void this.initBoard();
   }
 
   onDestroy() {
+    this.exitButton?.node.off(Button.EventType.CLICK, this.backToLobby);
     if (this.unsubMessage) {
       this.unsubMessage();
       this.unsubMessage = null;
@@ -228,18 +231,6 @@ export class MatchUI extends Component {
     for (const msg of buffered) {
       this.dispatch(msg);
     }
-  }
-
-  private makeLabel(parent: Node, name: string, text: string, fontSize: number, color: Color): Label {
-    const node = new Node(name);
-    node.layer = parent.layer;
-    node.parent = parent;
-    const label = node.addComponent(Label);
-    label.string = text;
-    label.fontSize = fontSize;
-    label.lineHeight = Math.round(fontSize * 1.3);
-    label.color = color;
-    return label;
   }
 
   private setStatus(text: string) {
@@ -503,7 +494,7 @@ export class MatchUI extends Component {
     this.scores = [p.scores[0], p.scores[1]];
     this.renderHud();
     this.stopReconnect();
-    this.settlementView?.show(p, this.mySeat);
+    this.settlement?.show(p, this.mySeat);
   }
 
   // ---- 断线重连（issue 08）----
@@ -573,25 +564,9 @@ export class MatchUI extends Component {
   }
 
   private showExitButton() {
-    if (this.exitButton || !this.statusLabel) {
-      return;
+    if (this.exitButton) {
+      this.exitButton.node.active = true;
     }
-    const node = new Node('ExitToLobby');
-    node.layer = this.statusLabel.node.layer;
-    node.parent = this.statusLabel.node.parent!;
-    node.addComponent(UITransform).setContentSize(280, 96);
-    const g = node.addComponent(Graphics);
-    g.fillColor = COLOR_BTN;
-    g.roundRect(-140, -48, 280, 96, 48);
-    g.fill();
-    const label = this.makeLabel(node, 'Label', '返回大厅', 32, COLOR_BTN_TEXT);
-    label.node.setPosition(0, 0);
-    const button = node.addComponent(Button);
-    button.target = node;
-    button.transition = Button.Transition.NONE;
-    node.on(Button.EventType.CLICK, this.backToLobby);
-    node.setPosition(0, -440);
-    this.exitButton = node;
   }
 
   // ---- 结算出口 ----

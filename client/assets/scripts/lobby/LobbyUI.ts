@@ -1,17 +1,12 @@
 // 大厅场景：开始匹配 / 取消匹配、排队等待与超时提示、匹配成功切换对局
-// 场景。UI 由代码搭建（骨架期占位实现）。
+// 场景。UI 骨架由编辑器搭建（ADR-0005），本组件只驱动行为。
 import {
   Button,
-  Color,
   Component,
   director,
-  Graphics,
   Label,
-  Node,
-  UITransform,
   _decorator,
 } from 'cc';
-import { ensureStage } from '../core/Stage';
 import { applySessionMessage, matchSession } from '../core/MatchSession';
 import { net } from '../net/NetClient';
 import {
@@ -27,62 +22,27 @@ import {
   encodeQueueJoin,
 } from '../protocol/Protocol';
 
-const { ccclass } = _decorator;
+const { ccclass, property } = _decorator;
 
 type LobbyState = 'idle' | 'connecting' | 'queued';
 
-const COLOR_TEXT = new Color(235, 235, 235, 255);
-const COLOR_MUTED = new Color(150, 150, 155, 255);
-const COLOR_BTN = new Color(0, 144, 255, 255);
-const COLOR_BTN_TEXT = new Color(255, 255, 255, 255);
-
-function makeLabel(parent: Node, name: string, text: string, fontSize: number, color: Color): Label {
-  const node = new Node(name);
-  node.layer = parent.layer;
-  node.parent = parent;
-  const label = node.addComponent(Label);
-  label.string = text;
-  label.fontSize = fontSize;
-  label.lineHeight = Math.round(fontSize * 1.3);
-  label.color = color;
-  return label;
-}
-
-function makeButton(parent: Node, name: string, text: string, width: number, height: number, onClick: () => void): Button {
-  const node = new Node(name);
-  node.layer = parent.layer;
-  node.parent = parent;
-  node.addComponent(UITransform).setContentSize(width, height);
-  const g = node.addComponent(Graphics);
-  g.fillColor = COLOR_BTN;
-  g.roundRect(-width / 2, -height / 2, width, height, height / 2);
-  g.fill();
-  const label = makeLabel(node, 'Label', text, 36, COLOR_BTN_TEXT);
-  label.node.setPosition(0, 0);
-  const button = node.addComponent(Button);
-  button.target = node;
-  button.transition = Button.Transition.NONE;
-  node.on(Button.EventType.CLICK, onClick);
-  return button;
-}
-
 @ccclass('LobbyUI')
 export class LobbyUI extends Component {
-  private state: LobbyState = 'idle';
+  @property(Label)
   private statusLabel: Label | null = null;
+
+  @property(Label)
   private buttonLabel: Label | null = null;
+
+  @property(Button)
+  private actionButton: Button | null = null;
+
+  private state: LobbyState = 'idle';
   private unsubMessage: (() => void) | null = null;
   private unsubClose: (() => void) | null = null;
 
   onLoad() {
-    const canvas = ensureStage();
-    makeLabel(canvas, 'Title', 'PopTrio', 80, COLOR_TEXT).node.setPosition(0, 500);
-    makeLabel(canvas, 'Subtitle', '三消 1v1 对战', 32, COLOR_MUTED).node.setPosition(0, 410);
-    this.statusLabel = makeLabel(canvas, 'Status', '', 36, COLOR_TEXT);
-    this.statusLabel.node.setPosition(0, 80);
-    const button = makeButton(canvas, 'Action', '', 400, 120, this.onAction);
-    button.node.setPosition(0, -100);
-    this.buttonLabel = button.node.getChildByName('Label')!.getComponent(Label)!;
+    this.actionButton?.node.on(Button.EventType.CLICK, this.onAction);
     this.enterIdle('点击「开始匹配」寻找对手');
     this.unsubMessage = net.onMessage(this.handleMessage);
     this.unsubClose = net.onClose(this.handleClose);
@@ -94,6 +54,7 @@ export class LobbyUI extends Component {
   }
 
   onDestroy() {
+    this.actionButton?.node.off(Button.EventType.CLICK, this.onAction);
     if (this.unsubMessage) {
       this.unsubMessage();
       this.unsubMessage = null;
